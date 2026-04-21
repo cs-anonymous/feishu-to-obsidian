@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-飞书知识库 → Obsidian 导出 v11
-关键修复：从 Content-Disposition header 提取真实文件名（包含扩展名）
-不再依赖 file_extension 字段
+飞书知识库 → Obsidian 导出 v12
+关键修复：使用随机哈希名称保存图片，避免文件名冲突
 """
-import os, re, json, time, requests, shutil, urllib.parse
+import os, re, json, time, requests, shutil, urllib.parse, uuid, hashlib
 from pathlib import Path
 
 # ============================================================
-# 配置：请修改以下三个值
+# 配置
 # ============================================================
-APP_ID = 'YOUR_APP_ID'           # 飞书应用 App ID
-APP_SECRET = 'YOUR_APP_SECRET'   # 飞书应用 App Secret
+APP_ID = 'cli_a93bb4aca4f85cc9'      # 飞书应用 App ID
+APP_SECRET = 'EYrNOBjQIhxfYCs2DMWgzekL48BoZQib'  # 飞书应用 App Secret
 USER_TOKEN = ''                  # 用户 Token（从 get_auth_url.py 和 exchange_token.py 获取）
 
 # 如果 USER_TOKEN 为空，从文件读取
@@ -20,8 +19,11 @@ if not USER_TOKEN and os.path.exists('.feishu_token'):
         USER_TOKEN = f.read().strip()
 
 OUTPUT_DIR = './feishu_export'
-FIGS_DIR = './figs'
+FIG_DIR = './figs'
 FILES_DIR = './feishu_files'
+
+# Token → 文件名映射（确保同一 token 使用同一文件名）
+TOKEN_FILE_MAP = 'feishu_token_file_map.json'
 # ============================================================
 
 # 绕过系统代理（如需要）
@@ -78,36 +80,134 @@ def extract_filename_from_cd(cd_header):
     return None
 
 # ============================================================
-# 下载：优先用 Content-Disposition 中的文件名，否则用 token+ext
+# 下载：使用随机哈希名称，避免文件名冲突
 # ============================================================
 _NO_PROXY = {'http': None, 'https': None}
 
-def download_media(token, fallback_name, save_dir):
-    """下载文件/图片，从 Content-Disposition 提取真实文件名"""
+# 全局 token → 文件名映射
+_token_file_map = {}
+
+def load_token_map():
+    """加载已有的 token → 文件名映射"""
+    global _token_file_map
+    if os.path.exists(TOKEN_FILE_MAP):
+        with open(TOKEN_FILE_MAP, 'r', encoding='utf-8') as f:
+            _token_file_map = json.load(f)
+
+def save_token_map():
+    """保存 token → 文件名映射"""
+    with open(TOKEN_FILE_MAP, 'w', encoding='utf-8') as f:
+        json.dump(_token_file_map, f, ensure_ascii=False, indent=2)
+
+def generate_hash_filename(token, ext):
+    """生成基于 token 的哈希文件名，确保同一 token 总是生成相同文件名"""
+    if token in _token_file_map:
+        return _token_file_map[token]
+    # 使用 token 的 MD5 前 16 位 + 随机 UUID 后缀
+    token_hash = hashlib.md5(token.encode()).hexdigest()[:12]
+    random_suffix = uuid.uuid4().hex[:8]
+    filename = f"{token_hash}_{random_suffix}.{ext}"
+    _token_file_map[token] = filename
+    return filename
+
+def download_media(token, ext, save_dir):
+    """下载文件/图片，使用哈希文件名"""
+    # 检查是否已下载过
+    if token in _token_file_map:
+        filename = _token_file_map[token]
+        filepath = os.path.join(save_dir, filename)
+        if os.path.exists(filepath):
+            return filename  # 已存在，直接返回
+
     r = requests.get(
         f'https://open.feishu.cn/open-apis/drive/v1/medias/{token}/download',
         headers=t_headers, stream=True, proxies=_NO_PROXY
     )
     if r.status_code == 200:
         os.makedirs(save_dir, exist_ok=True)
-        # 优先从 Content-Disposition 提取真实文件名
-        cd = r.headers.get('Content-Disposition', '')
-        real_name = extract_filename_from_cd(cd)
-        if not real_name:
-            real_name = fallback_name
-        fn = real_name
-        fp = os.path.join(save_dir, fn)
-        # 处理文件名冲突
-        if os.path.exists(fp):
-            n, e = os.path.splitext(fn)
+        # 生成哈希文件名
+        filename = generate_hash_filename(token, ext)
+        filepath = os.path.join(save_dir, filename)
+
+        # 确保文件名唯一
+        if os.path.exists(filepath):
+            n, e = os.path.splitext(filename)
             c = 1
-            while os.path.exists(f"{n}_{c}{e}"): c += 1
-            fn = f"{n}_{c}{e}"
-            fp = os.path.join(save_dir, fn)
-        with open(fp, 'wb') as f:
+            while os.path.exists(f"{save_dir}/{n}_{c}{e}"): c += 1
+            filename = f"{n}_{c}{e}"
+            _token_file_map[token] = filename
+            filepath = os.path.join(save_dir, filename)
+
+        with open(filepath, 'wb') as f:
             for chunk in r.iter_content(8192):
                 f.write(chunk)
-        return fn
+        return filename
+    return None
+
+def export_minder_to_image(minder_token, save_dir):
+    """
+    导出画板/白板为图片
+    使用飞书套件导出 API
+    """
+    global _token_file_map
+
+    # 检查是否已导出过
+    if minder_token in _token_file_map:
+        filename = _token_file_map[minder_token]
+        filepath = os.path.join(save_dir, filename)
+        if os.path.exists(filepath):
+            return filename
+
+    try:
+        # 1. 创建导出任务
+        create_url = 'https://open.feishu.cn/open-apis/suite/docs-api/minder/export'
+        create_data = {
+            "type": "png",
+            "minder_token": minder_token
+        }
+        r = requests.post(create_url, headers=t_headers, json=create_data, proxies=_NO_PROXY)
+
+        if r.status_code != 200:
+            print(f"      ⚠️ 画板导出创建任务失败: {r.status_code}")
+            return None
+
+        result = r.json()
+        if result.get('code') != 0:
+            print(f"      ⚠️ 画板导出 API 错误: {result.get('msg')}")
+            return None
+
+        task_token = result.get('data', {}).get('task_token')
+        if not task_token:
+            print(f"      ⚠️ 画板导出任务 token 为空")
+            return None
+
+        # 2. 轮询导出状态（最多等待 30 秒）
+        status_url = f'https://open.feishu.cn/open-apis/suite/docs-api/minder/export/{task_token}'
+        for i in range(30):
+            time.sleep(1)
+            r = requests.get(status_url, headers=t_headers, proxies=_NO_PROXY)
+            result = r.json()
+
+            if result.get('code') != 0:
+                break
+
+            status = result.get('data', {}).get('status')
+            if status == 'success':
+                # 3. 下载导出的图片
+                export_token = result.get('data', {}).get('export_token')
+                if export_token:
+                    filename = download_media(export_token, 'png', save_dir)
+                    if filename:
+                        _token_file_map[minder_token] = filename
+                        return filename
+                break
+            elif status == 'failed':
+                print(f"      ⚠️ 画板导出失败")
+                break
+
+    except Exception as e:
+        print(f"      ⚠️ 画板导出异常: {e}")
+
     return None
 
 # ============================================================
@@ -210,6 +310,18 @@ class Converter:
             result = self._image(b)
         elif bt == 31:
             result = self._table(b, bd)
+        elif bt == 502:
+            # 画板/白板 (MinderBlock)
+            minder_token = b.get('minder', {}).get('minder_token', '')
+            if minder_token:
+                fn = export_minder_to_image(minder_token, FIG_DIR)
+                if fn:
+                    self.stats['images'] += 1
+                    result = f"![[figs/{fn}]]"
+                else:
+                    result = f"_[画板导出失败，请在飞书中查看]_"
+            else:
+                result = f"_[画板，需在飞书中查看]_"
         elif bt in (24, 25):
             kids = b.get('children',[])
             if kids:
@@ -240,7 +352,7 @@ class Converter:
         t = b.get('image',{}).get('token','')
         if not t: return None
         ext = b.get('image',{}).get('file_extension','png')
-        fn = download_media(t, f"{t}.{ext}", FIG_DIR)
+        fn = download_media(t, ext, FIG_DIR)
         if fn:
             self.stats['images'] += 1
             return f"![[figs/{fn}]]"
@@ -250,7 +362,9 @@ class Converter:
         n = b.get('file',{}).get('name','')
         t = b.get('file',{}).get('token','')
         if not n: return None
-        fn = download_media(t, n, FILES_DIR)
+        # 文件保留原始名称，但使用 token 哈希避免冲突
+        ext = os.path.splitext(n)[1] if '.' in n else ''
+        fn = download_media(t, ext, FILES_DIR) if ext else download_media(t, '', FILES_DIR)
         if fn:
             self.stats['files'] += 1
             return f"[[feishu_files/{fn}]]"
@@ -259,17 +373,55 @@ class Converter:
             return f"[{n}](feishu-file://{t})"
 
     def _table(self, b, bd):
-        cells = b.get('table',{}).get('cells',[])
-        cc = b.get('table',{}).get('column_size',0)
-        if not cells or not cc: return None
-        rows, cur = [], []
-        for c in cells:
-            m = self._ids(c.get('blocks',[]), bd, 0)
-            cur.append(m.strip().replace("\n"," ") or " ")
-            if len(cur) == cc: rows.append(cur); cur = []
-        if cur: rows.append(cur)
-        if not rows: return None
-        return "\n".join(["| "+" | ".join(rows[0])+" |", "| "+" | ".join(["---"]*len(rows[0]))+" |"]+["| "+" | ".join(r)+" |" for r in rows[1:]])
+        """处理表格 block (新版 docx/v1 API)"""
+        # 新版 API：表格是嵌套 blocks 结构
+        # table block 包含 table_rows，每个 row 包含 table_cells
+        table_data = b.get('table', {})
+        children = b.get('children', [])
+
+        if not children:
+            # 尝试旧版格式
+            cells = table_data.get('cells', [])
+            cc = table_data.get('column_size', 0)
+            if not cells or not cc:
+                return None
+            rows, cur = [], []
+            for c in cells:
+                m = self._ids(c.get('blocks', []), bd, 0)
+                cur.append(m.strip().replace("\n", " ") or " ")
+                if len(cur) == cc:
+                    rows.append(cur)
+                    cur = []
+            if cur:
+                rows.append(cur)
+            if not rows:
+                return None
+            return "\n".join(
+                ["| " + " | ".join(rows[0]) + " |", "| " + " | ".join(["---"] * len(rows[0])) + " |"]
+                + ["| " + " | ".join(r) + " |" for r in rows[1:]]
+            )
+
+        # 新版 API：遍历 table_rows
+        rows = []
+        for row_id in children:
+            row_block = bd.get(row_id, {})
+            row_children = row_block.get('children', [])
+            cells = []
+            for cell_id in row_children:
+                cell_block = bd.get(cell_id, {})
+                cell_text = self._ids(cell_block.get('children', []), bd, 0)
+                cells.append(cell_text.strip().replace("\n", " ") or " ")
+            if cells:
+                rows.append(cells)
+
+        if not rows:
+            return None
+
+        # 生成 Markdown 表格
+        header = "| " + " | ".join(rows[0]) + " |"
+        separator = "| " + " | ".join(["---"] * len(rows[0])) + " |"
+        body = ["| " + " | ".join(r) + " |" for r in rows[1:]]
+        return "\n".join([header, separator] + body)
 
     def _ext(self, b, field_name):
         field = b.get(field_name, {})
@@ -329,14 +481,19 @@ def collect(tree, parent=None):
 
 def main():
     print("="*50)
-    print("飞书知识库 → Obsidian v11")
+    print("飞书知识库 → Obsidian v12")
     print("="*50)
+
+    # 加载 token → 文件名映射（如果是全新导出则清空）
+    load_token_map()
 
     # 清理旧导出
     for d in [OUTPUT_DIR, FIG_DIR, FILES_DIR]:
         if os.path.exists(d):
             print(f"🗑️  清理: {d}")
             shutil.rmtree(d)
+    # 清空 token 映射（全新导出）
+    _token_file_map.clear()
 
     with open('.feishu_tree.json','r',encoding='utf-8') as f:
         tree = json.load(f)
@@ -393,12 +550,16 @@ def main():
     img_count = len([f for f in os.listdir(FIG_DIR) if not f.startswith('.')])
     file_count = len([f for f in os.listdir(FILES_DIR) if not f.startswith('.')])
 
+    # 保存 token → 文件名映射
+    save_token_map()
+
     print(f"\n{'='*50}")
     print(f"✅ 完成!")
     print(f"   文档: {ok} 成功, {fail} 失败")
     print(f"   Markdown: {total_md:,} 字符")
     print(f"   图片: {img_count} 张 → figs/")
     print(f"   文件: {file_count} 个 → feishu_files/")
+    print(f"   Token 映射: {TOKEN_FILE_MAP}")
     if all_file_errors:
         print(f"\n⚠️  无法下载的文件 ({len(all_file_errors)} 个):")
         for fe in all_file_errors:

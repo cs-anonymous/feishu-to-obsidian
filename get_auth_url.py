@@ -4,8 +4,8 @@
 """
 import requests, urllib.parse
 
-APP_ID = 'YOUR_APP_ID'           # 飞书应用 App ID
-APP_SECRET = 'YOUR_APP_SECRET'  # 飞书应用 App Secret
+APP_ID = 'cli_a93bb4aca4f85cc9'      # 飞书应用 App ID
+APP_SECRET = 'EYrNOBjQIhxfYCs2DMWgzekL48BoZQib'  # 飞书应用 App Secret
 
 # Get app_access_token
 r = requests.post(
@@ -20,7 +20,7 @@ REDIRECT_URI = 'https://open.feishu.cn/connect/landing/authorize'
 params = {
     'app_id': APP_ID,
     'redirect_uri': REDIRECT_URI,
-    'scope': 'docx:document:readonly docx:document wiki:wiki:readonly',
+    'scope': 'docx:document:readonly docx:document wiki:wiki:readonly bitable:app:readonly drive:drive:readonly',
     'state': 'obsidian_export',
     'response_type': 'code',
 }

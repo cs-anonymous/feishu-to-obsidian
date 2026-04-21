@@ -6,6 +6,7 @@ __pycache__/
 # Token files
 .feishu_token
 .fei*.json
+feishu_token_file_map.json
 
 # Export output
 feishu_export/

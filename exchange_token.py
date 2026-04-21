@@ -5,8 +5,8 @@
 """
 import requests, sys
 
-APP_ID = 'YOUR_APP_ID'
-APP_SECRET = 'YOUR_APP_SECRET'
+APP_ID = 'cli_a93bb4aca4f85cc9'
+APP_SECRET = 'EYrNOBjQIhxfYCs2DMWgzekL48BoZQib'
 
 if len(sys.argv) < 2:
     print("用法: python3 exchange_token.py <code>")
@@ -14,6 +14,14 @@ if len(sys.argv) < 2:
     sys.exit(1)
 
 code = sys.argv[1]
+
+# 先获取 app_access_token
+r = requests.post(
+    'https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal',
+    json={'app_id': APP_ID, 'app_secret': APP_SECRET}
+)
+app_token = r.json().get('app_access_token')
+print(f'app_access_token: {app_token[:30]}...')
 
 # Exchange code for user access token
 r = requests.post(
@@ -23,7 +31,8 @@ r = requests.post(
         'code': code,
         'app_id': APP_ID,
         'app_secret': APP_SECRET,
-    }
+    },
+    headers={'Authorization': f'Bearer {app_token}'}
 )
 data = r.json()
 print(f"Response: {data}")
