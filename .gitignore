@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Token files
+.feishu_token
+.fei*.json
+
+# Export output
+feishu_export/
+figs/
+feishu_files/
+
+# macOS
+.DS_Store
